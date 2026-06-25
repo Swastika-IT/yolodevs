@@ -1,0 +1,68 @@
+nc: 3          # number of classes: full_grain, broken_grain, impurity
+scales:
+  n: [0.50, 0.25, 1024]   # depth, width, max_channels
+  s: [0.50, 0.50, 1024]
+  m: [0.50, 1.00, 512]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.50, 512]
+
+# ============================================================
+# BACKBONE — MobileNetV4-Conv-Medium
+# Format: [from, repeats, module, args]
+# 'from' = -1 means "previous layer"
+# ============================================================
+backbone:
+
+
+  - [-1, 1, Conv, [32, 3, 2]]
+  - [-1, 1, FusedIB, [48, 3, 2]]
+  - [-1, 1, ExtraDW, [80, 3, 5, 2]]
+  - [-1, 1, ExtraDW, [80, 3, 3, 1]]    # ← NECK references this as P3
+  - [-1, 1, ExtraDW, [160, 3, 5, 2]]
+  - [-1, 1, ExtraDW, [160, 3, 3, 1]]
+  - [-1, 1, ExtraDW, [160, 3, 3, 1]]
+  - [-1, 1, ExtraDW, [160, 3, 5, 1]]
+  - [-1, 1, ExtraDW, [160, 3, 3, 1]]
+  - [-1, 1, ConvNext, [160, 3, 1]]
+  - [-1, 1, FFN, [160]]
+  - [-1, 1, ConvNext, [160, 3, 1]]     # ← NECK references this as P4
+  - [-1, 1, ExtraDW, [256, 5, 5, 2]]
+  - [-1, 1, ExtraDW, [256, 5, 5, 1]]
+  - [-1, 1, ExtraDW, [256, 3, 5, 1]]
+  - [-1, 1, ExtraDW, [256, 3, 5, 1]]
+  - [-1, 1, FFN, [256]]
+  - [-1, 1, ConvNext, [256, 3, 1]]
+  - [-1, 1, ExtraDW, [256, 3, 5, 1]]
+  - [-1, 1, ExtraDW, [256, 5, 5, 1]]
+  - [-1, 1, FFN, [256]]
+  - [-1, 1, FFN, [256]]
+  - [-1, 1, ConvNext, [256, 5, 1]]     # ← NECK references this as P5
+  - [-1, 1, SPPF, [256, 5]]            # shortcut=True is set in the module itself
+
+# ============================================================
+# NECK — YOLO26 Native PAN (Path Aggregation Network)
+# Fuses P3, P4, P5 features for multi-scale detection
+# ============================================================
+neck:
+
+  - [-1, 1, C2PSA, [256]]
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]
+  - [[-1, 11], 1, Concat, [1]]         # 256+160=416 channels total
+  - [-1, 2, C3k2, [256, False]]
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]
+  - [[-1, 3], 1, Concat, [1]]          # 256+80=336 channels total
+  - [-1, 2, C3k2, [128, False]]        # ← Head 1 (small objects) reads from here
+  - [-1, 1, Conv, [128, 3, 2]]
+  - [[-1, 27], 1, Concat, [1]]         # 128+256=384 channels total
+  - [-1, 2, C3k2, [256, False]]        # ← Head 2 (medium objects) reads from here
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 24], 1, Concat, [1]]         # 256+256=512 channels total
+  - [-1, 2, C3k2, [256, True]]         # ← Head 3 (large objects) reads from here
+
+# ============================================================
+# HEAD — YOLO26-Seg (Instance Segmentation)
+# NMS-free dual assignment during training,
+# one-to-one head at inference.
+# ============================================================
+head:
+ - [[30, 33, 36], 1, Detect, [nc]]

@@ -1,0 +1,88 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# YOLO26-ResNet50  ·  Optimized YAML Configuration
+# Task    : Rice Variety Classification + Grain Defect Detection
+# Classes : Full, Broken, Chalky, Straw, Stone  (nc=5)
+# Input   : 640×640 (default)  –  any multiple of 32 works
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Global parameters ────────────────────────────────────────────────────────
+nc: 5          # number of classes (adjust to your dataset)
+imgsz: 640     # default inference size (height = width)
+reg_max: 16    # DFL regression bins in the detect head
+
+scales:
+  # [depth_multiple, width_multiple, max_channels]
+  # Only the 'm' (medium) scale is used here; add 's' / 'l' / 'x' if needed.
+  m: [0.50, 1.00, 512]
+
+
+# ── Backbone : ResNet-50 ─────────────────────────────────────────────────────
+# Notation: [from, repeats, module, args]
+# Output channel counts follow ResNet-50 spec (planes × 4 expansion):
+#   stage2 → 256 ch  (not used by neck; internal to backbone)
+#   stage3 → 512 ch  → P3  (1/8 resolution)
+#   stage4 → 1024 ch → P4  (1/16 resolution)
+#   stage5 → 2048 ch → P5  (1/32 resolution)
+#
+# NOTE: In the Python implementation (yolo26_resnet50.py) the entire backbone
+# is a single ResNet50Backbone module.  The indices below document the logical
+# flow so the neck wiring is easy to trace.
+
+backbone:
+  #  idx  from  reps  module            args
+  - [-1,   1,   Conv,         [64, 7, 2, 3]]        # 0  stem 7×7 s2 → 1/2
+  - [-1,   1,   nn.MaxPool2d, [3, 2, 1]]             # 1  maxpool s2  → 1/4
+
+  - [-1,   3,   ResNetBottleneck, [64,  1]]           # 2  stage2 (3×)  256-ch  1/4
+  - [-1,   4,   ResNetBottleneck, [128, 2]]           # 3  stage3 (4×)  512-ch  1/8   P3 ←
+  - [-1,   6,   ResNetBottleneck, [256, 2]]           # 4  stage4 (6×) 1024-ch  1/16  P4 ←
+  - [-1,   3,   ResNetBottleneck, [512, 2]]           # 5  stage5 (3×) 2048-ch  1/32  P5
+
+
+# ── Neck : YOLO26 FPN + Global Attention ─────────────────────────────────────
+neck:
+  # ── P5 enrichment ──────────────────────────────────────────────────────────
+  - [-1,   1,   SPPF,      [1024, 5]]              # 6  SPPF  2048→1024  1/32
+  - [-1,   1,   C2PSA,     [1024, 8]]              # 7  global self-attn  1/32
+
+  # ── Top-down P5 → P4 ───────────────────────────────────────────────────────
+  - [-1,   1,   nn.Upsample, [null, 2, 'nearest']] # 8  upsample → 1/16
+  - [[-1, 4], 1, Concat,    [1]]                   # 9  concat with backbone P4 → 2048-ch
+  - [-1,   3,   C3k2,       [512, true]]            # 10 fuse → 512-ch  1/16  P4_fused
+
+  # ── Top-down P4 → P3 ───────────────────────────────────────────────────────
+  - [-1,   1,   nn.Upsample, [null, 2, 'nearest']] # 11 upsample → 1/8
+  - [[-1, 3], 1, Concat,    [1]]                   # 12 concat with backbone P3 → 1024-ch
+  - [-1,   3,   C3k2,       [256, true]]            # 13 fuse → 256-ch  1/8   P3_fused
+
+
+# ── Head : NMS-Free Dual-Assignment Detect ───────────────────────────────────
+head:
+  # Receives feature maps from neck indices 13 (P3), 10 (P4), 7 (P5)
+  # ch = (256, 512, 1024)
+  - [[13, 10, 7], 1, Detect, [nc]]                  # 14 multi-scale detect
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Training hyperparameters  (override with your train.py --hyp flag)
+# ─────────────────────────────────────────────────────────────────────────────
+train:
+  epochs: 100
+  batch: 16
+  optimizer: AdamW
+  lr0: 0.001          # initial LR (stage-1: backbone frozen)
+  lrf: 0.01           # final LR fraction
+  warmup_epochs: 3
+  weight_decay: 0.0005
+  momentum: 0.937
+  hsv_h: 0.015        # colour augmentation
+  hsv_s: 0.7
+  hsv_v: 0.4
+  flipud: 0.0
+  fliplr: 0.5
+  mosaic: 1.0
+  mixup: 0.1
+
+  # Two-stage training schedule
+  freeze_backbone_epochs: 30   # keep backbone frozen for first N epochs
+  unfreeze_epoch: 30           # unfreeze + drop LR by 10× after this epoch

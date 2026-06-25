@@ -1,0 +1,64 @@
+
+nc: 80          # number of classes  — override per dataset
+depth_multiple: 1.0
+width_multiple: 1.0
+
+# ── Backbone ─────────────────────────────────────────────────
+# [from, repeats, module, args]
+# args for FusedMBConv / MBConv: [c_out, expansion, se_ratio, stride]
+# args for SPPF:                 [c_out, pool_kernel]
+backbone:
+  # Stage 0 — initial stem (3 → 24, stride 2)  → 320×320
+  - [-1, 1,  ConvBnAct,   [24, 3, 2]]            # 0  P1/2
+
+  # Stage 1 — Fused-MBConv1, stride=1 (24 → 24) → 320×320
+  - [-1, 2,  FusedMBConv, [24, 1, 0.0, 1]]       # 1
+
+  # Stage 2 — Fused-MBConv4, stride=2 (24 → 48) → 160×160
+  - [-1, 4,  FusedMBConv, [48, 4, 0.0, 2]]       # 2  P2/4
+
+  # Stage 3 — Fused-MBConv4, stride=2 (48 → 64) → 80×80   ← P3 anchor
+  - [-1, 4,  FusedMBConv, [64, 4, 0.0, 2]]       # 3  P3/8
+
+  # Stage 4 — MBConv4+SE, stride=2 (64 → 128)   → 40×40
+  - [-1, 6,  MBConv,      [128, 4, 0.25, 2]]     # 4  P4/16
+
+  # Stage 5 — MBConv6+SE, stride=1 (128 → 160)  → 40×40   ← P4 anchor
+  - [-1, 9,  MBConv,      [160, 6, 0.25, 1]]     # 5
+
+  # Stage 6 — MBConv6+SE, stride=2 (160 → 256)  → 20×20
+  - [-1, 15, MBConv,      [256, 6, 0.25, 2]]     # 6  P5/32
+
+  # Stage 7 — SPPF multi-scale context            → 20×20   ← P5 anchor
+  - [-1, 1,  SPPF,        [256, 5]]              # 7
+
+# ── Neck (PAN-FPN — adjust indices to match backbone above) ──
+# These are example placeholders; wire to your YOLO26 neck exactly.
+# Key connection points:
+#   P3 features → backbone[3]  (index 3)
+#   P4 features → backbone[5]  (index 5)
+#   P5 features → backbone[7]  (index 7)
+neck:
+  # Top-down path: P5 → P4
+  - [-1,        1, ConvBnAct, [160, 1, 1]]        # 8   1×1 compress P5
+  - [[-1, 5],   1, Concat,    [1]]                 # 9   cat with P4 (160+160=320)
+  - [-1,        3, MBConv,    [160, 4, 0.25, 1]]  # 10  fuse P4
+
+  # Top-down path: P4 → P3
+  - [-1,        1, ConvBnAct, [64, 1, 1]]          # 11  1×1 compress
+  - [[-1, 3],   1, Concat,    [1]]                 # 12  cat with P3 (64+64=128)
+  - [-1,        3, MBConv,    [64, 4, 0.25, 1]]   # 13  fuse P3  → small head input
+
+  # Bottom-up path: P3 → P4
+  - [-1,        1, FusedMBConv, [160, 4, 0.0, 2]] # 14  downsample
+  - [[-1, 10],  1, Concat,      [1]]               # 15  cat with neck P4
+  - [-1,        3, MBConv,      [160, 6, 0.25, 1]]# 16  fuse → medium head input
+
+  # Bottom-up path: P4 → P5
+  - [-1,        1, FusedMBConv, [256, 4, 0.0, 2]] # 17  downsample
+  - [[-1, 7],   1, Concat,      [1]]               # 18  cat with backbone P5
+  - [-1,        3, MBConv,      [256, 6, 0.25, 1]]# 19  fuse → large head input
+
+# ── Detection Heads ──────────────────────────────────────────
+head:
+  - [[13, 16, 19], 1, Detect, [nc]]               # small / medium / large
